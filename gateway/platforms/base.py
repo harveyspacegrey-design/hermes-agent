@@ -824,6 +824,7 @@ def cache_video_from_bytes(data: bytes, ext: str = ".mp4") -> str:
 # ---------------------------------------------------------------------------
 
 DOCUMENT_CACHE_DIR = get_hermes_dir("cache/documents", "document_cache")
+REPORT_CACHE_DIR = get_hermes_dir("cache/reports", "report_cache")
 SCREENSHOT_CACHE_DIR = get_hermes_dir("cache/screenshots", "browser_screenshots")
 _HERMES_HOME = get_hermes_home()
 MEDIA_DELIVERY_ALLOW_DIRS_ENV = "HERMES_MEDIA_ALLOW_DIRS"
@@ -832,6 +833,7 @@ MEDIA_DELIVERY_SAFE_ROOTS = (
     AUDIO_CACHE_DIR,
     VIDEO_CACHE_DIR,
     DOCUMENT_CACHE_DIR,
+    REPORT_CACHE_DIR,
     SCREENSHOT_CACHE_DIR,
     _HERMES_HOME / "image_cache",
     _HERMES_HOME / "audio_cache",
