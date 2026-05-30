@@ -195,6 +195,55 @@ def test_report_md_is_human_readable(curator_env):
     assert "Consolidated foo-like skills into foo-umbrella." in md
 
 
+def test_run_report_summarizes_skill_quality(curator_env):
+    """Curator reports should surface skill quality telemetry from outcome tracking."""
+    curator = curator_env["curator"]
+    start = datetime.now(timezone.utc)
+    after_report = [
+        {
+            "name": "solid-skill",
+            "state": "active",
+            "quality_state": "active",
+            "success_count": 3,
+            "failure_count": 0,
+            "success_rate": 1.0,
+            "needs_rewrite": False,
+        },
+        {
+            "name": "bad-skill",
+            "state": "active",
+            "quality_state": "deprecated",
+            "success_count": 1,
+            "failure_count": 4,
+            "success_rate": 0.2,
+            "needs_rewrite": True,
+        },
+    ]
+
+    run_dir = curator._write_run_report(
+        started_at=start,
+        elapsed_seconds=3.0,
+        auto_counts={"checked": 2, "marked_stale": 0, "archived": 0, "reactivated": 0},
+        auto_summary="no changes",
+        before_report=after_report,
+        before_names={r["name"] for r in after_report},
+        after_report=after_report,
+        llm_meta=_make_llm_meta(),
+    )
+
+    payload = json.loads((run_dir / "run.json").read_text())
+    assert payload["quality_counts"] == {"active": 1, "deprecated": 1}
+    assert payload["counts"]["needs_rewrite"] == 1
+
+    md = (run_dir / "REPORT.md").read_text()
+    assert "Skill quality" in md
+    assert "deprecated: **1**" in md
+    assert "needs rewrite: **1**" in md
+    assert "`bad-skill`" in md
+    assert "1/5 success" in md
+
+
+
 def test_same_second_reruns_get_unique_dirs(curator_env):
     """If the curator somehow runs twice in the same second, the second
     report still gets its own directory rather than overwriting the first."""

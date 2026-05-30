@@ -55,6 +55,17 @@ STATE_STALE = "stale"
 STATE_ARCHIVED = "archived"
 _VALID_STATES = {STATE_ACTIVE, STATE_STALE, STATE_ARCHIVED}
 
+# Orthogonal quality lifecycle inspired by nano-hermes. ``state`` above is the
+# curator's storage/activity lifecycle (active/stale/archived). ``quality_state``
+# tracks whether an agent-created skill has earned trust or needs attention.
+QUALITY_DRAFT = "draft"
+QUALITY_ACTIVE = "active"
+QUALITY_DEPRECATED = "deprecated"
+_VALID_OUTCOMES = {"success", "failure"}
+_PROMOTION_SUCCESS_THRESHOLD = 3
+_DEPRECATION_MIN_OUTCOMES = 5
+_DEPRECATION_MAX_SUCCESS_RATE = 0.2
+
 
 def _skills_dir() -> Path:
     return get_hermes_home() / "skills"
@@ -150,6 +161,28 @@ def activity_count(record: Dict[str, Any]) -> int:
         except (TypeError, ValueError):
             continue
     return total
+
+
+def _derive_outcome_fields(record: Dict[str, Any]) -> None:
+    """Backfill derived outcome counters in-place.
+
+    Older ``.usage.json`` files won't have these fields. Keeping the derived
+    values on the record makes CLI/status/reporting code cheap and keeps the
+    sidecar human-readable.
+    """
+    try:
+        success = int(record.get("success_count") or 0)
+    except (TypeError, ValueError):
+        success = 0
+        record["success_count"] = 0
+    try:
+        failure = int(record.get("failure_count") or 0)
+    except (TypeError, ValueError):
+        failure = 0
+        record["failure_count"] = 0
+    total = success + failure
+    record["outcome_count"] = total
+    record["success_rate"] = (success / total) if total else None
 
 
 # ---------------------------------------------------------------------------
@@ -315,6 +348,15 @@ def _empty_record() -> Dict[str, Any]:
         "last_patched_at": None,
         "created_at": _now_iso(),
         "state": STATE_ACTIVE,
+        "quality_state": QUALITY_ACTIVE,
+        "success_count": 0,
+        "failure_count": 0,
+        "outcome_count": 0,
+        "success_rate": None,
+        "last_outcome": None,
+        "last_success_at": None,
+        "last_failure_at": None,
+        "needs_rewrite": False,
         "pinned": False,
         "archived_at": None,
     }
@@ -374,6 +416,7 @@ def get_record(skill_name: str) -> Dict[str, Any]:
     base = _empty_record()
     for k, v in base.items():
         rec.setdefault(k, v)
+    _derive_outcome_fields(rec)
     return rec
 
 
@@ -438,6 +481,62 @@ def mark_agent_created(skill_name: str) -> None:
     """
     def _apply(rec: Dict[str, Any]) -> None:
         rec["created_by"] = "agent"
+        rec.setdefault("quality_state", QUALITY_DRAFT)
+        if (
+            rec.get("quality_state") == QUALITY_ACTIVE
+            and int(rec.get("success_count") or 0) < _PROMOTION_SUCCESS_THRESHOLD
+        ):
+            rec["quality_state"] = QUALITY_DRAFT
+    _mutate(skill_name, _apply)
+
+
+def record_outcome(skill_name: str, outcome: str) -> None:
+    """Record whether using *skill_name* helped or failed.
+
+    This is the foundation for Harvey's skill-quality loop: outcomes are tracked
+    separately from the curator's activity counters, then agent-created skills
+    move draft -> active after repeated success or active/draft -> deprecated
+    after repeated poor outcomes. Deprecated means "needs review/rewrite"; it
+    does not archive or delete the skill.
+    """
+    normalized = str(outcome or "").strip().lower()
+    if normalized not in _VALID_OUTCOMES:
+        raise ValueError("outcome must be 'success' or 'failure'")
+
+    def _apply(rec: Dict[str, Any]) -> None:
+        now = _now_iso()
+        if normalized == "success":
+            rec["success_count"] = int(rec.get("success_count") or 0) + 1
+            rec["last_success_at"] = now
+        else:
+            rec["failure_count"] = int(rec.get("failure_count") or 0) + 1
+            rec["last_failure_at"] = now
+        rec["last_outcome"] = normalized
+        _derive_outcome_fields(rec)
+
+        is_managed = _is_curator_managed_record(rec)
+        if not is_managed:
+            rec.setdefault("quality_state", QUALITY_ACTIVE)
+            rec.setdefault("needs_rewrite", False)
+            return
+
+        success_count = int(rec.get("success_count") or 0)
+        outcome_count = int(rec.get("outcome_count") or 0)
+        success_rate = rec.get("success_rate")
+        if (
+            outcome_count >= _DEPRECATION_MIN_OUTCOMES
+            and success_rate is not None
+            and float(success_rate) <= _DEPRECATION_MAX_SUCCESS_RATE
+        ):
+            rec["quality_state"] = QUALITY_DEPRECATED
+            rec["needs_rewrite"] = True
+        elif success_count >= _PROMOTION_SUCCESS_THRESHOLD:
+            rec["quality_state"] = QUALITY_ACTIVE
+            rec["needs_rewrite"] = False
+        else:
+            rec["quality_state"] = QUALITY_DRAFT
+            rec["needs_rewrite"] = False
+
     _mutate(skill_name, _apply)
 
 

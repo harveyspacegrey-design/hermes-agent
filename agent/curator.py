@@ -1024,6 +1024,17 @@ def _write_run_report(
         name = tc.get("name", "unknown")
         tc_counts[name] = tc_counts.get(name, 0) + 1
 
+    # Skill-quality snapshot (orthogonal to curator active/stale/archive state).
+    quality_counts: Dict[str, int] = {}
+    rewrite_candidates: List[Dict[str, Any]] = []
+    for row in after_report:
+        if not isinstance(row, dict):
+            continue
+        quality = str(row.get("quality_state") or "active")
+        quality_counts[quality] = quality_counts.get(quality, 0) + 1
+        if row.get("needs_rewrite"):
+            rewrite_candidates.append(row)
+
     # Split "removed" into consolidated (absorbed into umbrella) vs pruned
     # (archived for staleness, content not preserved elsewhere). The old
     # "Skills archived" section lumped both together, which misled users
@@ -1113,8 +1124,11 @@ def _write_run_report(
             "pruned_this_run": len(pruned),
             "state_transitions": len(transitions),
             "cron_jobs_rewritten": int(cron_rewrites.get("jobs_updated", 0)),
+            "needs_rewrite": len(rewrite_candidates),
             "tool_calls_total": sum(tc_counts.values()),
         },
+        "quality_counts": quality_counts,
+        "rewrite_candidates": rewrite_candidates,
         "tool_call_counts": tc_counts,
         "archived": removed,
         "consolidated": consolidated,
@@ -1201,6 +1215,34 @@ def _render_report_markdown(p: Dict[str, Any]) -> str:
     lines.append(f"- state transitions (active ↔ stale ↔ archived): "
                  f"**{counts.get('state_transitions', 0)}**")
     lines.append("")
+
+    quality_counts = p.get("quality_counts") or {}
+    rewrite_candidates = p.get("rewrite_candidates") or []
+    if quality_counts or rewrite_candidates:
+        lines.append("## Skill quality\n")
+        for quality, count in sorted(quality_counts.items()):
+            lines.append(f"- {quality}: **{count}**")
+        lines.append(f"- needs rewrite: **{counts.get('needs_rewrite', 0)}**")
+        if rewrite_candidates:
+            lines.append("")
+            lines.append("### Rewrite candidates\n")
+            SHOW = 25
+            for row in rewrite_candidates[:SHOW]:
+                name = row.get("name", "?")
+                try:
+                    success = int(row.get("success_count") or 0)
+                except (TypeError, ValueError):
+                    success = 0
+                try:
+                    failure = int(row.get("failure_count") or 0)
+                except (TypeError, ValueError):
+                    failure = 0
+                total = success + failure
+                ratio = f"{success}/{total} success" if total else "no outcomes"
+                lines.append(f"- `{name}` — {ratio}; suggest a gated rewrite before relying on it")
+            if len(rewrite_candidates) > SHOW:
+                lines.append(f"- … and {len(rewrite_candidates) - SHOW} more (see `run.json`)")
+        lines.append("")
 
     # Consolidated list — content absorbed into an umbrella. The directory
     # on disk still lives under ~/.hermes/skills/.archive/ (every removal is
